@@ -12,6 +12,8 @@ use Bernard\QueueFactory\PersistentFactory;
 use Building\Domain\Aggregate\Building;
 use Building\Domain\Command;
 use Building\Domain\DomainEvent\CheckInAnomalyDetected;
+use Building\Domain\DomainEvent\UserCheckedIn;
+use Building\Domain\DomainEvent\UserCheckedOut;
 use Building\Domain\Repository\BuildingRepositoryInterface;
 use Building\Infrastructure\Repository\BuildingRepository;
 use Doctrine\DBAL\Connection;
@@ -25,6 +27,7 @@ use Prooph\Common\Event\ActionEventListenerAggregate;
 use Prooph\Common\Event\ProophActionEventEmitter;
 use Prooph\Common\Messaging\FQCNMessageFactory;
 use Prooph\Common\Messaging\NoOpMessageConverter;
+use Prooph\EventSourcing\AggregateChanged;
 use Prooph\EventSourcing\EventStoreIntegration\AggregateTranslator;
 use Prooph\EventStore\Adapter\Doctrine\DoctrineEventStoreAdapter;
 use Prooph\EventStore\Adapter\Doctrine\Schema\EventStoreSchema;
@@ -32,6 +35,7 @@ use Prooph\EventStore\Adapter\PayloadSerializer\JsonPayloadSerializer;
 use Prooph\EventStore\Aggregate\AggregateRepository;
 use Prooph\EventStore\Aggregate\AggregateType;
 use Prooph\EventStore\EventStore;
+use Prooph\EventStore\Stream\StreamName;
 use Prooph\EventStoreBusBridge\EventPublisher;
 use Prooph\EventStoreBusBridge\TransactionManager;
 use Prooph\ServiceBus\Async\MessageProducer;
@@ -247,6 +251,43 @@ return new ServiceManager([
                     new AggregateTranslator()
                 )
             );
+        },
+        'project-registered-users-to-public' => function (ContainerInterface $container) : callable {
+            $eventStore = $container->get(EventStore::class);
+
+            return function () use ($eventStore) {
+                /** @var AggregateChanged[] $history */
+                $history = $eventStore->loadEventsByMetadataFrom(
+                    new StreamName('event_stream'),
+                    [
+                        'aggregate_type' => Building::class,
+                    ]
+                );
+
+                /** @var array<string, array<string, null>> $usersPerBuilding indexed by building id and username */
+                $usersPerBuilding = [];
+
+                foreach ($history as $domainEvent) {
+                    if (! isset($usersPerBuilding[$domainEvent->aggregateId()])) {
+                        $usersPerBuilding[$domainEvent->aggregateId()] = [];
+                    }
+
+                    if ($domainEvent instanceof UserCheckedIn) {
+                        $usersPerBuilding[$domainEvent->aggregateId()][$domainEvent->username()] = null;
+                    }
+
+                    if ($domainEvent instanceof UserCheckedOut) {
+                        unset($usersPerBuilding[$domainEvent->aggregateId()][$domainEvent->username()]);
+                    }
+                }
+
+                \array_walk($usersPerBuilding, function (array $users, string $buildingId) {
+                    file_put_contents(
+                        __DIR__ . '/public/building-' . $buildingId . '.json',
+                        \json_encode(\array_keys($users))
+                    );
+                });
+            };
         },
     ],
 ]);
